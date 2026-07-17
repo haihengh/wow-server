@@ -1,5 +1,48 @@
 # Distributed WoW Server Architecture — Design Document
 
+## 0. Legal Position & Threat Model (read first)
+
+### 0.1 Legal position
+
+This project is research/design-only. Before any public deployment is
+considered, resolve the following — they change the design, not just the
+disclaimer text:
+
+- **Copyright/EULA exposure**: WoW private servers already sit in a legally
+  gray/unauthorized zone under Blizzard's EULA and prior enforcement history.
+  Adding financial incentives (a token with real or exchange value) turns a
+  hobby-project risk into a commercial-infringement + possible
+  money-transmission/securities-law question. Treat this as a blocking
+  decision, not a footnote.
+- **Token design decision (must be made before §5 is finalized)**: choose one
+  of:
+  1. **Non-transferable contribution credit** (internal point system, no
+     external exchange value) — materially lower legal exposure, but weaker
+     incentive design.
+  2. **Tradeable token** — stronger incentive design, but requires legal
+     counsel review (securities law, money transmission) before any code
+     that mints/transfers value is written.
+  The rest of this document assumes decision 1 unless/until counsel says
+  otherwise. Any tokenomics work in §5 is illustrative, not a commitment.
+- This repo will not operate a public/shared realm. All exploration is local
+  or private-network only until the above is resolved.
+
+### 0.2 Threat model
+
+Two distinct classes of "attacker" apply here, with different mitigations:
+
+| Actor | Goal | Mitigation |
+|---|---|---|
+| **Malicious/Byzantine node** | Forge state, double-spend rewards, censor players | Consensus + slashing (§3) |
+| **Colluding validator cartel** | Approve invalid epochs as a group to split rewards | Requires randomized/rotating validator selection + minimum honest-majority assumption; not yet designed — open question |
+| **Sybil host** | Register many low-cost identities to dominate proposer selection | Staking cost per identity (§5.2) |
+| **Legal/takedown actor** (e.g., rights holder, regulator) | Shut down the network, seize infrastructure | Out of scope for technical mitigation; addressed only by §0.1 legal decisions, not architecture |
+
+The rest of this document addresses the first two rows in detail. The last
+row is a reminder that no amount of P2P/consensus design solves the legal
+problem — don't over-invest in decentralization as a legal shield without
+counsel confirming it helps.
+
 ## 1. Current State: Monolithic worldserver
 
 Both AzerothCore and CMaNGOS share the same fundamental architecture. The
@@ -99,6 +142,150 @@ This is the hardest problem. Solutions:
 3. **Zone-based sharding instead**: shard at zone boundaries (where loading
    screens already exist) to avoid real-time cross-node combat entirely.
 
+**Decision: option 3 (zone-based sharding) is the recommended default.**
+Options 1 and 2 solve real-time grid-boundary sync but add substantial
+complexity (see Phase 4 status note below) for a problem zone-based sharding
+avoids by construction. Grid-level sharding (options 1/2) remains a
+documented fallback only if zone-based load balancing proves insufficient —
+see the Phase 4 entry in §6 for the exact trigger condition.
+
+### 2.4 Worked Example: Player Kills a Creature
+
+To make the architecture concrete, here's how a single player action flows
+through the distributed system:
+
+```
+Player casts Fireball at a wolf in Elwynn Forest.
+Elwynn Forest is hosted on Map Node A.
+
+Step  Client              World Router        Map Node A          Consensus
+
+1.    Send CMSG_CAST_     ──forward──►        Receive spell
+      SPELL (wolf GUID)                       cast request
+
+2.                                            Validate: player
+                                              has mana? spell
+                                              off cooldown? in
+                                              range? LOS clear?
+
+3.                                            Execute tick:
+                                              - Deduct mana
+                                              - Compute damage
+                                              - Apply to wolf
+                                              - Remove wolf if
+                                                health ≤ 0
+                                              - Generate loot
+                                              - Award XP
+
+4.                                            At epoch end,
+                                              produce State Diff:
+                                              {player.mana -= X,
+                                               wolf: DELETED,
+                                               corpse: CREATED,
+                                               loot: CREATED,
+                                               player.xp += Y}
+                                              + Input Log entry
+                                              ──submit──►
+
+5.                                                         Verifier
+                                                            replays inputs,
+                                                            computes same
+                                                            State Root,
+                                                            votes accept
+```
+
+**Things to notice:**
+
+- Steps 1-3 happen **immediately** (optimistic execution). The player sees
+  the fireball hit, the wolf die, and the loot sparkle all within a single
+  tick — no consensus delay.
+- Consensus (steps 4-5) happens **asynchronously** at epoch boundaries. The
+  player doesn't wait for it. If the epoch is later rejected, a rollback
+  occurs (see §2.5).
+- Cross-service interactions (chat message about the kill, guild achievement
+  progress, auction house if the loot gets listed) are separate async events
+  fanned out from Map Node A to the relevant services — not part of the
+  combat hot path.
+- The **World Router** is a thin proxy here: it routes the client's TCP
+  stream to whichever Map Node owns the player's current zone. It doesn't
+  inspect or validate game packets.
+
+### 2.5 Failure Modes & Recovery
+
+#### 2.5.1 Map Node Crash (Mid-Epoch)
+
+If a Map Node crashes before submitting its epoch:
+
+- **Detection**: World Router's heartbeat to the node times out (suggested:
+  3× tick interval = 150ms).
+- **Player impact**: All players on that node's maps get a loading screen
+  (the existing WoW client behavior for a server disconnect).
+- **Recovery**:
+  1. World Router marks the node's current epoch as abandoned.
+  2. Router reassigns the node's maps to other Map Nodes (or spawns a
+     replacement).
+  3. Replacement node loads the **last committed epoch's state** for those
+     maps from the consensus log (static data from the World DB, entity
+     state from the state trie).
+  4. Players reconnect transparently — their character state rolls back to
+     the last committed epoch (at most ~10 seconds of progress lost).
+  5. If the crashed node had submitted a partial epoch that verifiers had
+     started replaying, verifiers discard it when the epoch's proposer slot
+     is declared vacant.
+
+**Design decision: players lose at most one epoch of progress on crash.**
+This is the optimistic-execution tradeoff — fast responses in exchange for
+occasional small rollbacks. For a research/private-server context, this is
+acceptable. For a production-hardened system, this would need refinement.
+
+#### 2.5.2 World Router Crash
+
+- **Detection**: Client TCP disconnect + authserver heartbeat timeout.
+- **Recovery**: The Router is stateless (session → Map Node mapping is
+  derivable from the consensus log). A replacement Router reconnects
+  clients to their last known Map Node.
+- **Mitigation**: Run multiple Router instances behind a TCP load balancer
+  or use DNS failover. Since the Router only proxies and doesn't hold game
+  state, hot standby is straightforward.
+
+#### 2.5.3 Consensus Stall (No Epoch Finalized)
+
+If verifiers cannot reach consensus on an epoch:
+
+- **Cause**: Non-deterministic simulation bug, malicious proposer, or
+  network partition among verifiers.
+- **Detection**: Epoch remains un-finalized beyond a timeout (suggested:
+  5× epoch duration).
+- **Recovery**:
+  1. The proposer's stake is frozen pending investigation.
+  2. Verifiers fall back to a **replay-from-last-known-good** checkpoint:
+     discard the disputed epoch, re-simulate from the last committed state
+     with the same Input Log, but on a single canonical verifier node to
+     produce a reference result.
+  3. If the reference result matches the proposer: consensus resumes
+     (verifier bug). If it differs: proposer slashed, epoch discarded,
+     next proposer in rotation picks up.
+
+#### 2.5.4 Client Protocol Constraints
+
+The WoW client is a **closed binary that speaks a fixed protocol**. This
+imposes hard constraints on the distributed design:
+
+| Constraint | Impact |
+|---|---|
+| **Single TCP connection** — the client connects to one server IP:port and expects to stay connected | The World Router must proxy the same TCP stream for the entire session; the client cannot be told "reconnect to this other Map Node now" without a loading screen |
+| **Loading screens are the only redirect points** — the client already accepts a new server address at zone transitions and instance portals | Zone-based sharding (§2.3 option 3) is the only approach that works **without client modifications** |
+| **Opcodes are fixed** — we can't add new packet types for cross-node sync | All distributed-system protocol is server-side only; the client sees the same opcode stream it always has |
+| **No client-side consensus awareness** — the client can't participate in verification or hold tokens | The token and consensus layer is entirely invisible to the game client |
+
+**Implication**: The World Router can't just hand the client a new TCP
+endpoint mid-session. It must either (a) proxy the byte stream
+transparently to the correct Map Node, or (b) use the existing loading-screen
+mechanism to redirect. Approach (a) adds latency (an extra hop through the
+Router). Approach (b) is free but limited to zone boundaries. The Phase 2-3
+plan uses (b) for zone transitions and (a) as a fallback for intra-zone
+operations like chat and mail.
+
 ---
 
 ## 3. Consensus Model: Proof-of-Simulation
@@ -127,6 +314,10 @@ replaying the same inputs.
 ```
 
 **Epoch**: A block of K game ticks (e.g., K=200 = 10 seconds of game time).
+**TBD**: this value is illustrative, not derived from data. It should be set
+after Phase 0 profiling shows how much state-diff/Input-Log volume a real
+raid-sized epoch produces, and after §3.3.1's verification-cost analysis
+sets an upper bound on safe epoch size.
 
 Each epoch produces:
 - **State Diff**: which entities changed, and how
@@ -153,6 +344,30 @@ Produce State Root               Compare: Root == Root' ?
 Submit to consensus              Vote: accept / reject
 ```
 
+### 3.3.1 Verification Cost Asymmetry (open risk)
+
+Naive replay-verification has a structural weakness: verifying an epoch
+costs roughly the same CPU as producing it (unless the verifier has spare
+capacity). This creates two exploitable gaps:
+
+- **Asymmetric DoS**: a proposer can pack an epoch with worst-case-expensive
+  content (e.g., a full 40-player raid with heavy AoE/threat-table churn, or
+  many simultaneous pathfinding requests) that costs the proposer normal
+  compute but pushes verifiers toward their capacity limit — especially
+  problematic if verifier count is small relative to proposer throughput.
+- **Under-verification incentive**: if verification isn't profitable relative
+  to its cost, rational verifiers skip it, weakening the security model.
+
+Mitigations to design before implementing consensus (not yet resolved):
+- **Bounded epochs**: cap entities/ticks/actions per epoch so worst-case
+  verification cost has a known ceiling (trades off epoch throughput).
+  Compute-proportional staking: `required_stake ∝ declared entity/tick count`, so
+  proposers can't cheaply claim to have done more work than a lightweight,
+  low-stake identity can be trusted for.
+- **Verification reward must exceed replay cost** in the reward split (§5.3)
+  — the 30% verifier pool figure there is a placeholder, not a value derived
+  from actual replay-cost measurements.
+
 ### 3.4 Consensus Protocol Options
 
 | Protocol | Latency | Throughput | Use Case |
@@ -167,6 +382,11 @@ Submit to consensus              Vote: accept / reject
   publish state diffs, verifiers challenge within a window)
 - **BFT consensus** for critical events (boss kills, loot drops, currency
   transfers) that need immediate finality
+
+**TBD**: this table and recommendation are candidate options, not a
+protocol selection — no prototyping or benchmarking has been done yet. Pin
+down actual numbers (real HotStuff/Tendermint latency under realistic
+validator counts) before committing engineering effort to either.
 
 ---
 
@@ -187,6 +407,8 @@ Current codebases are NOT deterministic:
 | Timer-based events | Wall-clock dependent | Convert all timers to tick-count-based |
 | Pointer comparison | ASLR makes addresses non-deterministic | Never use pointer values in game logic; use entity GUIDs |
 | Multithreading races | MapUpdater parallel updates | Single-thread or deterministic scheduler for replay |
+| Recast/Detour navmesh pathfinding | Not guaranteed bit-identical across compilers/architectures even with strict floating-point mode; runs every tick for every moving creature — larger surface area than the RNG issue above | Either pin a single pathfinding build (same binary/arch for all proposer+verifier nodes, sacrificing "any hardware" goal) or replace with a deterministic fixed-point path solver; unresolved — needs its own investigation before Phase 4/5 |
+| Network jitter / action ordering | Two players' near-simultaneous actions can arrive in different relative order depending on network timing, producing different (but each individually "valid") outcomes | Define a canonical ordering rule up front — e.g., order by (server-received tick, connection sequence number, player GUID) — and record the resulting order in the Input Log itself, not just raw arrival order, so replay is unambiguous |
 
 ### 4.2 Deterministic Entity State
 
@@ -246,6 +468,14 @@ Distribution (per epoch):
   └──────────────────┴───────────┘
 ```
 
+**TBD**: the 50/30/15/5 split and decay curve are placeholders for
+illustration only. The verifier-pool share in particular must be set high
+enough to exceed replay cost (see §3.3.1) or verification participation
+will collapse; don't treat these percentages as settled until that's
+modeled. Also revisit §0.1's token-design decision before implementing any
+of this — a non-transferable credit system may not need a "Fee Pool" or
+"Treasury/DAO" concept at all.
+
 ### 5.4 In-Game Token Integration
 
 The token could serve dual purpose:
@@ -302,7 +532,7 @@ Goal: Multiple worldserver nodes, each owning a subset of continent maps.
       World Router handles zone transitions by redirecting the client.
 ```
 
-### Phase 4 — Grid-Level Sharding
+### Phase 4 — Grid-Level Sharding (provisional — see §2.3 decision)
 
 The hardest step — shard within a single map:
 - Adjacent grids on different nodes
@@ -313,6 +543,15 @@ The hardest step — shard within a single map:
 Goal: A single continent split across multiple nodes at grid boundaries.
       Players can see and interact across node boundaries seamlessly.
 ```
+
+**Status: not committed.** §2.3 lists zone-based sharding as an alternative
+to grid-level sharding that avoids real-time cross-node combat entirely by
+reusing existing loading-screen boundaries. Zone-based sharding is the
+*default target* for the mesh's long-term steady state — it is simpler,
+lower-risk, and may be sufficient. Grid-level sharding should only be
+pursued past Phase 3 if profiling shows zone-based sharding produces
+unacceptable load imbalance (e.g., one zone consistently overloaded — think
+a capital city hub). Do not start Phase 4 work until that data exists.
 
 ### Phase 5 — Consensus & Token Layer
 
@@ -325,6 +564,32 @@ Goal: A single continent split across multiple nodes at grid boundaries.
 Goal: A fully decentralized WoW server mesh where anyone can host nodes,
       verify simulation, and earn tokens.
 ```
+
+---
+
+## 6.5 Non-Goals (v1 scope boundary)
+
+To keep scope from creeping ahead of what's actually been validated, the
+following are explicitly **out of scope** until the stated gate is met:
+
+- **No tradeable/exchange-value token** until §0.1's legal decision is made
+  with counsel input. Default assumption for all current work: internal,
+  non-transferable contribution credit only.
+- **No grid-level sharding (Phase 4)** until Phase 3 (zone-based sharding)
+  is running and profiling shows a specific load-imbalance problem it
+  can't solve.
+- **No public/shared realm deployment** — all work is local/private-network
+  exploration until legal review is complete.
+- **No CMaNGOS distributed implementation** — CMaNGOS stays reference-only
+  (§9); all phased work targets AzerothCore.
+- **No committed epoch size, reward split, or consensus protocol** — the
+  numbers in §3.2, §3.4, and §5.3 are placeholders pending Phase 0
+  profiling data; do not hardcode them into any prototype without first
+  gathering that data.
+- **No NAT traversal / P2P networking implementation** in early phases —
+  Phases 1-3 assume operator-run nodes with public reachability (like
+  today's private servers); permissionless home-hosting (§7 open question
+  6) is deferred to Phase 5+.
 
 ---
 
@@ -372,6 +637,16 @@ Goal: A fully decentralized WoW server mesh where anyone can host nodes,
 
 ## 9. Key Files to Study
 
+**Scope note**: The phased roadmap (§6) and file references throughout this
+document target **AzerothCore only**. CMaNGOS is retained in the repo as a
+comparative reference for Phase 0 profiling (simpler codebase, useful for
+validating that the architectural patterns in §1 generalize across
+MaNGOS-lineage servers) but is *not* a second implementation target — doing
+so would double the Phase 0-5 analysis and engineering work for uncertain
+benefit. If CMaNGOS-specific distributed work becomes valuable later, treat
+it as a separate follow-on effort with its own roadmap, not a parallel track
+of this one.
+
 ### AzerothCore
 | File | What It Does |
 |---|---|
@@ -382,7 +657,7 @@ Goal: A fully decentralized WoW server mesh where anyone can host nodes,
 | `src/server/game/Server/WorldSocket.cpp` | Client TCP connection handler |
 | `src/server/database/DatabaseWorkerPool.h` | DB connection pooling |
 
-### CMaNGOS
+### CMaNGOS (reference only — see scope note above)
 | File | What It Does |
 |---|---|
 | `src/mangosd/Main.cpp` | Entry point |

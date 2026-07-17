@@ -5,12 +5,18 @@ blockchain-like architecture — enabling multiple independent hosts to run serv
 nodes, verify each other's game simulation, and earn rewards for contributing
 compute and hosting capacity.
 
+**Status: research/design only.** No distributed code has been written yet.
+See [§0 of the design doc](docs/distributed-architecture.md#0-legal-position--threat-model-read-first)
+for the legal considerations that must be resolved before any public
+deployment, and [§6.5](docs/distributed-architecture.md#65-non-goals-v1-scope-boundary)
+for what's explicitly out of scope right now.
+
 ## Repositories Under Study
 
 | Repository | Game Version | Status |
 |---|---|---|
-| [AzerothCore](azerothcore-wotlk/) | WotLK 3.3.5a | Primary — recommended foundation |
-| [CMaNGOS](mangos-classic/) | Classic 1.12 | Secondary — simpler, but older patterns |
+| [AzerothCore](azerothcore-wotlk/) | WotLK 3.3.5a | Primary — implementation target for the phased roadmap |
+| [CMaNGOS](mangos-classic/) | Classic 1.12 | Reference only — used for comparative analysis, not a second implementation track (see design doc §9) |
 
 ## High-Level Architecture (Current State)
 
@@ -74,11 +80,14 @@ The existing map/grid system provides the seams for distribution:
 See [docs/distributed-architecture.md](docs/distributed-architecture.md) for the
 full design document covering:
 
+0. **Legal position & threat model** — must be resolved before anything public
 1. **Service decomposition** — splitting the worldserver monolith
 2. **Consensus model** — how nodes agree on game state
 3. **Deterministic simulation** — requirements for verifiable replay
-4. **Token economics** — reward mechanism for hosting nodes
+4. **Token economics** — reward mechanism for hosting nodes (illustrative;
+   pending the legal/token-design decision in §0)
 5. **Phased implementation roadmap** — incremental path from monolith to mesh
+6. **Non-goals** — explicit v1 scope boundaries
 
 ## Quick Start (Local Exploration)
 
@@ -96,4 +105,6 @@ cd mangos-classic
 ## License
 
 The analysis and design documents in this repository are for research purposes.
-AzerothCore is GPLv2. CMaNGOS is GPLv2.
+AzerothCore is GPLv2. CMaNGOS is GPLv2. No public or shared realm is operated
+from this repository; see the design doc's legal section before considering
+any deployment beyond local exploration.
