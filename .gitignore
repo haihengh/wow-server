@@ -1,6 +1,18 @@
 # Reference WoW server codebases (large nested repos, not part of this project's source)
 azerothcore-wotlk/
+mangos-classic/
+classic-db/
+acore-client/
+WoWSilicon/
+
+# Runtime / install directory (binaries, configs, logs, crash dumps)
 mangos-install/
+mysql-data-backup/
+ramdisk/
+my.ini
+resolve_symbol.cpp
+resolve_symbol.exe
+resolve_symbol.obj
 
 # IDE / tooling
 .abacusai/
