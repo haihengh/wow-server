@@ -333,50 +333,108 @@ The install directory now contains all executables, config templates, and requir
 
 ---
 
-## 7. Extract Client Data (Maps, DBC)
+## 7. Extract Client Data (Maps, DBC, VMaps, MMaps)
 
-You need your WoW 1.12 client. This guide assumes it's at `C:\World of Warcraft Classic`.
+You need your WoW 1.12 client. This guide assumes:
+- WoW client at `C:\World of Warcraft Classic`
+- Server install at `C:\code\wow-server\wow-server\mangos-install`
+- Platform: Windows with PowerShell / Git Bash
 
-### 7a. Extract maps and DBC (~20 minutes)
+| Data | Tool | Time | Size | Required? |
+|---|---|---|---|---|
+| **Maps** | `ad.exe` | ~15 min | ~1 GB | Yes — server won't load without them |
+| **DBC** | `ad.exe` | (included) | ~50 MB | Yes — client database files |
+| **VMaps** | `vmap_extractor` + `vmap_assembler` | ~30 min | ~300 MB | Strongly recommended — line-of-sight, height, indoor/outdoor |
+| **MMaps** | `MoveMapGen.exe` | 1–2 hours | ~2 GB | Recommended — full bot pathfinding navigation mesh |
+
+### 7a. One-shot extraction script (PowerShell)
+
+Copy all four extractors to the WoW directory and run everything in sequence:
+
 ```powershell
-cd "C:\World of Warcraft Classic"
-D:\code\wow-server\mangos-install\tools\ad.exe
-```
-Creates `maps\` and `dbc\` folders in the current directory.
+$WoW = "C:\World of Warcraft Classic"
+$Tools = "C:\code\wow-server\wow-server\mangos-install\tools"
+$Install = "C:\code\wow-server\wow-server\mangos-install"
 
-### 7b. Copy to server
-```powershell
-Copy-Item -Recurse "C:\World of Warcraft Classic\maps" "D:\code\wow-server\mangos-install\"
-Copy-Item -Recurse "C:\World of Warcraft Classic\dbc" "D:\code\wow-server\mangos-install\"
-```
+# Copy extractors to WoW directory
+Copy-Item "$Tools\ad.exe", "$Tools\vmap_extractor.exe", "$Tools\vmap_assembler.exe" $WoW
 
-### 7c. Create empty directories (prevents crashes)
-```powershell
-mkdir D:\code\wow-server\mangos-install\vmaps
-mkdir D:\code\wow-server\mangos-install\mmaps
-```
+# Step 1: Maps + DBC (~15 min)
+Write-Host "=== Extracting Maps + DBC ===" -ForegroundColor Green
+Push-Location $WoW
+.\ad.exe
+Pop-Location
 
-> **Minimum setup:** Maps + DBC are sufficient for the server to start and function. VMaps and MMaps provide line-of-sight and pathfinding but require hours to extract and are optional.
+# Copy to install
+Copy-Item -Recurse "$WoW\maps" $Install
+Copy-Item -Recurse "$WoW\dbc" $Install
+Write-Host "Maps + DBC done." -ForegroundColor Green
 
-### 7d. (Optional) Extract VMaps — better line of sight (~30 min)
-```powershell
-cd "C:\World of Warcraft Classic"
-D:\code\wow-server\mangos-install\tools\vmap_extractor.exe        # Extract building models
-D:\code\wow-server\mangos-install\tools\vmap_assembler.exe Buildings vmaps  # Assemble
-Copy-Item -Recurse "C:\World of Warcraft Classic\vmaps" "D:\code\wow-server\mangos-install\"
-```
+# Step 2: VMaps (~30 min)
+Write-Host "=== Extracting VMaps ===" -ForegroundColor Green
+Push-Location $WoW
+.\vmap_extractor.exe
+# Output dir must exist before assembly
+New-Item -ItemType Directory -Force -Path "$WoW\vmaps" | Out-Null
+.\vmap_assembler.exe Buildings vmaps
+Pop-Location
 
-### 7e. (Optional) Generate MMaps — pathfinding/navigation (~1-2 hours)
-```powershell
-cd D:\code\wow-server\mangos-install
+Copy-Item -Recurse "$WoW\vmaps" $Install
+Write-Host "VMaps done." -ForegroundColor Green
+
+# Step 3: MMaps (~1-2 hours) — requires maps + vmaps already in install dir
+Write-Host "=== Generating MMaps (1-2 hours) ===" -ForegroundColor Green
+Push-Location $Install
 .\tools\MoveMapGen.exe
+Pop-Location
+Write-Host "All client data extracted." -ForegroundColor Green
 ```
-Reads `maps/` and `vmaps/`, outputs to `mmaps/`. After generation, enable in `mangosd.conf`:
+
+### 7b. One-shot extraction script (Git Bash)
+
+```bash
+WOW="/c/World of Warcraft Classic"
+TOOLS="C:/code/wow-server/wow-server/mangos-install/tools"
+INSTALL="C:/code/wow-server/wow-server/mangos-install"
+
+# Copy extractors
+cp "$TOOLS/ad.exe" "$TOOLS/vmap_extractor.exe" "$TOOLS/vmap_assembler.exe" "$WOW/"
+
+# Step 1: Maps + DBC (~15 min)
+echo "=== Extracting Maps + DBC ==="
+cd "$WOW" && ./ad.exe
+cp -r "$WOW/maps" "$WOW/dbc" "$INSTALL/"
+echo "Maps + DBC done."
+
+# Step 2: VMaps (~30 min)
+echo "=== Extracting VMaps ==="
+cd "$WOW" && ./vmap_extractor.exe
+mkdir -p "$WOW/vmaps"
+./vmap_assembler.exe Buildings vmaps
+cp -r "$WOW/vmaps" "$INSTALL/"
+echo "VMaps done."
+
+# Step 3: MMaps (~1-2 hours)
+echo "=== Generating MMaps (1-2 hours) ==="
+cd "$INSTALL" && ./tools/MoveMapGen.exe
+echo "All client data extracted."
+```
+
+### 7c. Enable pathfinding in config
+
+After extraction, enable VMaps and MMaps in `mangosd.conf`:
+
 ```
 vmap.enableLOS = 1
 vmap.enableHeight = 1
 vmap.enableIndoorCheck = 1
 mmap.enabled = 1
+```
+
+If you skip VMaps/MMaps, keep them disabled and create empty directories to prevent crashes:
+
+```powershell
+New-Item -ItemType Directory -Force -Path "$Install\vmaps", "$Install\mmaps"
 ```
 
 ---
