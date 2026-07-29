@@ -1,0 +1,3 @@
+[submodule "classic-db"]
+	path = classic-db
+	url = https://github.com/haihengh/classic-db.git
