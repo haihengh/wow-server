@@ -1,6 +1,5 @@
 # Reference WoW server codebases (large nested repos, not part of this project's source)
 azerothcore-wotlk/
-mangos-classic/
 mangos-install/
 
 # IDE / tooling

@@ -1,3 +1,6 @@
 [submodule "classic-db"]
 	path = classic-db
 	url = https://github.com/haihengh/classic-db.git
+[submodule "mangos-classic"]
+	path = mangos-classic
+	url = https://github.com/haihengh/mangos-classic.git
